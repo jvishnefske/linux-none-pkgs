@@ -31,6 +31,10 @@ toolchain and std:
   `getpwuid_r`, ...) come from rust-std's runtime (`rt/src/clib.rs`), and
   empty `libc.a`, `libdl.a`, ... satisfy crates that ask the linker for
   them;
+- C code in crates (ring, aws-lc, zstd, ...) is compiled by their build
+  scripts with the host's gcc, with Nix's hardening flags off: rt has no
+  `__stack_chk_fail` or `_FORTIFY_SOURCE`'s `__*_chk` functions. It links
+  where rt's C functions (`malloc`, pthread mutexes, ...) are all it calls;
 - the rustflags are those of rust-std's `apps/.cargo/config.toml`
   (`+crt-static`, static relocation model, `-no-pie`).
 
@@ -46,7 +50,7 @@ To add a package, add its nixpkgs attribute name to `selection` in
 
 ## What builds
 
-24 of the 39 packages tried. Each one is a static ELF with no
+28 of the 41 packages tried. Each one is a static ELF with no
 undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 
 | package | version | smoke test |
@@ -75,15 +79,20 @@ undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 | broot | 1.61.0 | print its shell function (it needs a terminal) |
 | procs | 0.14.12 | list a process |
 | bottom | 0.15.0 | `--version` (a terminal UI) |
+| tealdeer | 1.9.1 | `--version` (it fetches its pages) |
+| oxipng | 10.2.1 | optimize a PNG |
+| miniserve | 0.35.0 | serve a file over HTTPS: rustls on ring, HTTP/1.1 and 2 |
+| static-web-server | 2.44.1 | serve a file over HTTPS: rustls on aws-lc |
 
 ## What doesn't, and why
 
-The other 15, by cause (as of nixpkgs `1d06008`):
+The other 13, by cause (as of nixpkgs `1d06008`):
 
-- **C code**, which needs a C library (`malloc`, stdio, pthreads,
-  `__stack_chk_fail`, glibc's fortified functions):
-  - `bat`, `eza`, `lsd`, `delta`, `fselect`: libgit2 or oniguruma
-  - `jaq`, `jql`, `skim`, `tealdeer`, `oxipng`: C dependencies of their own
+- **C code that needs more of a C library** than rt has:
+  - `bat`, `eza`, `lsd`, `delta`: libgit2 or oniguruma (`strncpy`,
+    `strncasecmp`, `mkdir`, ...)
+  - `fselect` (`pthread_rwlock_*`), `jaq` (`pthread_key_*`, `select`),
+    `jql` (`pthread_getattr_np`, ...), `skim` (`killpg`, `mkfifo`)
   - `hck` (zlib-ng), `taplo` and `xh` (OpenSSL): their build scripts look
     for the C library and fail
 - **Other:** `huniq` uses the removed `stdsimd` feature (an old `ahash`

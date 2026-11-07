@@ -66,6 +66,10 @@
           nativeBuildInputs = [ toolchain ];
           # static binaries: nothing for strip / patchelf to do
           dontFixup = true;
+          # C code in crates (ring, zstd) is compiled with the host's gcc;
+          # without the hardening flags, it needs no __stack_chk_fail or
+          # *_chk functions, which there is no libc to provide
+          hardeningDisable = [ "all" ];
           configurePhase = ''
             runHook preConfigure
             export CARGO_HOME=$TMPDIR/cargo-home
@@ -208,7 +212,33 @@
         bottom = ''
           btm --version | grep -q bottom
         '';
+        oxipng = ''
+          echo iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg== | base64 -d > p.png
+          oxipng -o 2 --out o.png p.png 2>&1 | grep -q 'Files processed: 1/1'
+          [ "$(head -c 4 o.png | tail -c 3)" = PNG ]
+        '';
+        # it needs a network to fetch its pages
+        tealdeer = ''
+          tldr --version | grep -q tealdeer
+        '';
+        # web servers, over TLS with rustls: ring's crypto, then aws-lc's
+        miniserve = https 8443 "miniserve www -i 127.0.0.1 -p 8443 --tls-cert cert.pem --tls-key key.pem";
+        static-web-server = https 8444
+          "static-web-server --host 127.0.0.1 --port 8444 --root www --http2 --http2-tls-cert cert.pem --http2-tls-key key.pem";
       };
+
+      # serve www/hi.txt with a self-signed certificate, and fetch it with
+      # curl over TLS
+      https = port: server: ''
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+          -keyout key.pem -out cert.pem -days 1 -subj /CN=localhost 2>/dev/null
+        mkdir www && echo hello > www/hi.txt
+        ${server} &
+        get() { curl -sf --cacert cert.pem --resolve localhost:${toString port}:127.0.0.1 "$@" https://localhost:${toString port}/hi.txt; }
+        for i in $(seq 100); do get -o /dev/null && break; sleep 0.1; done
+        [ "$(get --http1.1)" = hello ] && [ "$(get --http2)" = hello ]
+        kill %1
+      '';
 
       # packages changed for linux-none: without their C parts
       overrides = {
@@ -222,13 +252,13 @@
       # `nix build .#candidates.<name>`
       candidates = lib.genAttrs [
         "jaq" "taplo" "hck"
-        "huniq" "jql" "tealdeer" "oxipng" "eza" "lsd"
+        "huniq" "jql" "eza" "lsd"
         "bat" "gitui" "delta" "xh" "fselect" "skim"
       ] (name: linuxNone pkgs.${name} { });
 
       # static, non-PIE executables with no PT_INTERP / PT_DYNAMIC and no
       # undefined symbol, that pass the smoke test
-      check = name: test: pkgs.runCommand "${name}-linux-none-check" { nativeBuildInputs = [ pkgs.binutils ]; } ''
+      check = name: test: pkgs.runCommand "${name}-linux-none-check" { nativeBuildInputs = with pkgs; [ binutils curl openssl ]; } ''
         for f in ${built.${name}}/bin/*; do
           readelf -hW $f | grep -q "Type: *EXEC" || { echo "$f: not ET_EXEC"; exit 1; }
           ! readelf -lW $f | grep -qE "INTERP|DYNAMIC" || { echo "$f: dynamically linked"; exit 1; }
