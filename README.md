@@ -25,19 +25,28 @@ toolchain and std:
 - every vendored `libc` gets the fixup std's own libc gets
   (`xtask libc-fixup`): musl's types and constants for linux-none,
   and no `-lc`. Without it libc does not compile for an empty
-  `target_env`;
+  `target_env`. Other crates that pick libc's glibc or musl definitions
+  by `target_env` (`nix`, `socket2`, ...) get musl's (`xtask musl-cfg`);
+- the libc functions crates call (`isatty`, `mmap`, `sigaction`,
+  `getpwuid_r`, ...) come from rust-std's runtime (`rt/src/clib.rs`), and
+  empty `libc.a`, `libdl.a`, ... satisfy crates that ask the linker for
+  them;
 - the rustflags are those of rust-std's `apps/.cargo/config.toml`
   (`+crt-static`, static relocation model, `-no-pie`).
+
+`overrides` in `flake.nix` changes a package first where needed: ripgrep
+is built without its pcre2 feature, which is C.
 
 Only the executables are installed: no man pages, shell completions or
 wrappers from the nixpkgs `postInstall`.
 
 To add a package, add its nixpkgs attribute name to `selection` in
-`flake.nix` with a smoke test.
+`flake.nix` with a smoke test. The packages that don't build yet are in
+`candidates`: `nix build .#candidates.bat` shows why.
 
 ## What builds
 
-Six of the 39 packages tried. Each one is a static ELF with no
+24 of the 39 packages tried. Each one is a static ELF with no
 undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 
 | package | version | smoke test |
@@ -48,37 +57,42 @@ undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 | shellharden | 4.3.2 | quote a variable |
 | rnr | 0.5.1 | rename files by regex |
 | ruplacer | 0.10.0 | replace in a directory tree |
+| fd | 10.5.0 | find files by extension |
+| dust | 1.2.7 | directory sizes |
+| choose | 1.3.7 | pick a field |
+| typos | 1.51.1 | find a typo |
+| stylua | 2.6.0 | format Lua |
+| htmlq | 0.4.0 | query HTML |
+| pastel | 0.12.0 | convert a color |
+| fastmod | 0.4.4 | replace in a directory tree |
+| zoxide | 0.10.0 | add and query a directory |
+| ripgrep | 15.2.0 | search (without pcre2) |
+| tokei | 15.0.0 | count lines of code |
+| hyperfine | 2.0.0 | benchmark a command, export JSON |
+| dua | 2.46.0 | disk usage |
+| just | 1.59.0 | run a recipe |
+| mdbook | 0.5.4 | build a book |
+| broot | 1.61.0 | print its shell function (it needs a terminal) |
+| procs | 0.14.12 | list a process |
+| bottom | 0.15.0 | `--version` (a terminal UI) |
 
 ## What doesn't, and why
 
-The other 33, by cause (as of nixpkgs `1d06008`):
+The other 15, by cause (as of nixpkgs `1d06008`):
 
-- **Calls libc functions.** The libc crate gives the types and
-  constants, but there is no libc to supply its functions, so the link
-  fails on undefined symbols. Some only need a few that are thin
-  syscall wrappers:
-  - `choose`: `isatty`
-  - `tokei`: `ioctl`, `syscall`
-  - `stylua`: `isatty`, `sched_getaffinity`, `sysconf`
-  - `typos`: `mmap`, `munmap`, `uname`, `dl_iterate_phdr`
-  - `zoxide`: `getuid`, `getpwuid_r`, `sysconf`, `exp`
-  - `htmlq`: `isatty`, `pow`
-  - `fastmod`, `dust`, `fd`, `dua`, `tealdeer`, `jql`, `pastel`: more
-    (signals, semaphores, epoll, `fork`/`execvp`, `dlsym`, ...)
-- **C code**, which needs a C library: `ripgrep` (pcre2), `bat`, `eza`
-  and `lsd` (libgit2/oniguruma), `oxipng`, `hck` (zlib-ng), `taplo` and
-  `xh` (OpenSSL), `bottom` (`-ldl`).
-- **The `nix` crate has no linux-none arm** (`__fsword_t`, `O_FSYNC`
-  missing): `hyperfine`, `jaq`, `just`, `delta`, `fselect`, `broot`.
-- **`socket2` has no linux-none arm** (`IovLen`): `mdbook`, `procs`,
-  `skim`.
+- **C code**, which needs a C library (`malloc`, stdio, pthreads,
+  `__stack_chk_fail`, glibc's fortified functions):
+  - `bat`, `eza`, `lsd`, `delta`, `fselect`: libgit2 or oniguruma
+  - `jaq`, `jql`, `skim`, `tealdeer`, `oxipng`: C dependencies of their own
+  - `hck` (zlib-ng), `taplo` and `xh` (OpenSSL): their build scripts look
+    for the C library and fail
 - **Other:** `huniq` uses the removed `stdsimd` feature (an old `ahash`
   on a new nightly); `gitui`'s build script wants environment the
   nixpkgs derivation sets, which `linuxNone` doesn't copy.
 
-A Rust implementation of the common libc functions on top of the
-runtime's syscalls, and the libc-style fixup for `nix` and `socket2`,
-would cover most of the first, third and fourth groups.
+Some of these may have cargo features that drop their C parts, as
+ripgrep's pcre2 feature does; an override in `overrides` would then get
+them building.
 
 The `rust-std` input is `git+file:///home/j/src/rust-std`: it builds from
 the committed state of that repo. Run `nix flake update rust-std` after

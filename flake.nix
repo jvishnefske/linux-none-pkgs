@@ -14,6 +14,14 @@
       inherit (rust-std.packages.${system}) toolchain xtask std-src;
       target = "x86_64-unknown-linux-none";
 
+      # Empty libc.a, libdl.a, ...: some crates ask the linker for them, and
+      # on linux-none the runtime provides their functions (as musl's libc
+      # holds libdl's, libm's and libpthread's)
+      emptyLibs = pkgs.runCommand "linux-none-empty-libs" { } ''
+        mkdir -p $out/lib
+        for l in c dl m pthread rt util; do printf '!<arch>\n' > $out/lib/lib$l.a; done
+      '';
+
       # Rebuild a nixpkgs `buildRustPackage` package from its own source and
       # vendored crates, with std built from the patched tree. Only the
       # binaries are kept: no man pages, completions or wrappers.
@@ -22,21 +30,25 @@
           deps = pkg.cargoDeps;
           # crates.io: the package's crates plus std's (rust-src vendors them).
           # libc gets std's fixup (musl's types and constants, nothing to
-          # link), so its checksums of the files go.
+          # link); crates that pick libc's glibc or musl definitions by
+          # target_env get musl's. Patched crates lose their file checksums.
           registry = pkgs.runCommand "${pkg.pname}-linux-none-registry" { nativeBuildInputs = [ xtask pkgs.jq ]; } ''
             mkdir $out
             for d in ${deps}/source-registry-0/* ${std-src}/library/vendor/*; do
               n=$(basename $d)
               [ -e $out/$n ] && continue
               case $n in
-                libc-*)
-                  cp -r $d $out/$n
-                  chmod -R u+w $out/$n
-                  xtask libc-fixup $out/$n
-                  jq -c '.files = {}' $d/.cargo-checksum.json > $out/$n/.cargo-checksum.json
-                  ;;
-                *) ln -s $d $out/$n ;;
+                libc-*) fixup=libc-fixup ;;
+                *) grep -rqs 'target_env = "musl"' $d/src && fixup=musl-cfg || fixup= ;;
               esac
+              if [ -z "$fixup" ]; then
+                ln -s $d $out/$n
+                continue
+              fi
+              cp -r $d $out/$n
+              chmod -R u+w $out/$n
+              xtask $fixup $out/$n
+              jq -c '.files = {}' $d/.cargo-checksum.json > $out/$n/.cargo-checksum.json
             done
           '';
           flags = lib.escapeShellArgs (
@@ -74,7 +86,7 @@
 
             # static, non-PIE: the runtime does not relocate itself
             [target.${target}]
-            rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static", "-C", "link-arg=-no-pie"]
+            rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static", "-C", "link-arg=-no-pie", "-L", "native=${emptyLibs}/lib"]
             EOF
             export __CARGO_TESTS_ONLY_SRC_ROOT=${std-src}/library
             export CARGO_TARGET_DIR=$NIX_BUILD_TOP/cargo-target
@@ -124,9 +136,95 @@
           ruplacer world nix r --go
           [ "$(cat r/t)" = "hello nix" ]
         '';
+        fd = ''
+          mkdir -p a/b && touch a/b/m.rs a/x.txt
+          [ "$(fd -e rs . a)" = a/b/m.rs ]
+        '';
+        dust = ''
+          mkdir -p a && head -c 100000 /dev/zero > a/f
+          dust -b -c a | grep -q ' a$'
+        '';
+        choose = ''
+          [ "$(echo 'a b c' | choose 1)" = b ]
+        '';
+        typos = ''
+          echo 'teh word' > t.txt
+          ! typos t.txt > out
+          grep -q '`teh` should be `the`' out
+        '';
+        stylua = ''
+          [ "$(echo 'local x   =  1' | stylua -)" = "local x = 1" ]
+        '';
+        htmlq = ''
+          [ "$(echo '<p><a href=x>hi</a></p>' | htmlq --text a)" = hi ]
+        '';
+        pastel = ''
+          [ "$(pastel format hex 'rgb(255,0,0)')" = "#ff0000" ]
+        '';
+        fastmod = ''
+          mkdir m && echo 'teh word' > m/t.txt
+          fastmod --accept-all teh the m
+          [ "$(cat m/t.txt)" = "the word" ]
+        '';
+        zoxide = ''
+          export _ZO_DATA_DIR=$PWD/z
+          mkdir -p some/dir
+          zoxide add some/dir
+          [ "$(zoxide query dir)" = "$PWD/some/dir" ]
+        '';
+        ripgrep = ''
+          mkdir s && printf 'a\nneedle here\n' > s/f.txt
+          [ "$(rg -n needle s)" = "s/f.txt:2:needle here" ]
+        '';
+        tokei = ''
+          mkdir t && printf 'fn main() {\n    // hi\n}\n' > t/m.rs
+          tokei t | grep -E '^ *Rust +1 +3 +2 +1 +0'
+        '';
+        hyperfine = ''
+          hyperfine -N --runs 3 --export-json h.json true
+          grep -q '"command": "true"' h.json
+        '';
+        dua = ''
+          mkdir u && head -c 10000 /dev/zero > u/f
+          dua u | grep -q 'KiB f$'
+        '';
+        just = ''
+          printf 'hello:\n\techo hi-from-just\n' > justfile
+          [ "$(just hello 2>/dev/null)" = hi-from-just ]
+        '';
+        mdbook = ''
+          mkdir -p book/src && printf '[book]\ntitle = "t"\n' > book/book.toml
+          printf '# Summary\n\n- [Ch](ch.md)\n' > book/src/SUMMARY.md && echo '# Ch' > book/src/ch.md
+          mdbook build book && grep -q '<h1' book/book/ch.html
+        '';
+        # interactive: check that it starts
+        broot = ''
+          broot --print-shell-function bash | grep -q broot
+        '';
+        procs = ''
+          procs --no-header --color disable --pager disable $$ | grep -q "$$"
+        '';
+        # a terminal UI: check that it starts
+        bottom = ''
+          btm --version | grep -q bottom
+        '';
       };
 
-      built = lib.mapAttrs (name: _: linuxNone pkgs.${name} { }) selection;
+      # packages changed for linux-none: without their C parts
+      overrides = {
+        # pcre2 is C
+        ripgrep = pkgs.ripgrep.overrideAttrs { buildFeatures = [ ]; };
+      };
+
+      built = lib.mapAttrs (name: _: linuxNone (overrides.${name} or pkgs.${name}) { }) selection;
+
+      # packages tried that don't build yet (see the README), to retry with
+      # `nix build .#candidates.<name>`
+      candidates = lib.genAttrs [
+        "jaq" "taplo" "hck"
+        "huniq" "jql" "tealdeer" "oxipng" "eza" "lsd"
+        "bat" "gitui" "delta" "xh" "fselect" "skim"
+      ] (name: linuxNone pkgs.${name} { });
 
       # static, non-PIE executables with no PT_INTERP / PT_DYNAMIC and no
       # undefined symbol, that pass the smoke test
@@ -145,6 +243,8 @@
     in
     {
       lib.${system}.linuxNone = linuxNone;
+
+      legacyPackages.${system}.candidates = candidates;
 
       checks.${system} = lib.mapAttrs check selection;
 
