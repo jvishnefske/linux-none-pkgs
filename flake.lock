@@ -52,11 +52,11 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1794036008,
-        "narHash": "sha256-p9vq1iogfRX4tCveDaUtV0UQ03FVCM9Ct47nSaU0C8g=",
+        "lastModified": 1794036175,
+        "narHash": "sha256-Xfi6mUcVs1IzOnZ81WPeaiF8TQQBfbsNYZJOuYi22rA=",
         "ref": "refs/heads/main",
-        "rev": "8e92ae82cbc740ea27208fad27dc52aea222809e",
-        "revCount": 21,
+        "rev": "bf9da735f2251e790605e0e2b3deaac4e737abac",
+        "revCount": 22,
         "type": "git",
         "url": "file:///home/j/src/rust-std"
       },
