@@ -63,7 +63,11 @@
           sourceRoot = pkg.sourceRoot or null;
           cargoRoot = pkg.cargoRoot or null;
           patches = pkg.patches or [ ];
-          nativeBuildInputs = [ toolchain ];
+          # the package's build tools (cmake, pkg-config, ...), not
+          # nixpkgs' cargo and rustc and their hooks
+          nativeBuildInputs = [ toolchain ]
+            ++ lib.filter (d: !lib.any (p: lib.hasPrefix p (d.name or "")) [ "cargo" "auditable-cargo" "rustc" ])
+              (pkg.nativeBuildInputs or [ ]);
           # static binaries: nothing for strip / patchelf to do
           dontFixup = true;
           # C code in crates (ring, zstd) is compiled with the host's gcc;
@@ -92,6 +96,15 @@
             [target.${target}]
             rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static", "-C", "link-arg=-no-pie", "-L", "native=${emptyLibs}/lib"]
             EOF
+            # for C libraries built with cmake (the cmake crate): there is no
+            # libc.a for its compiler checks to link against, so they build a
+            # static library instead
+            cat > $TMPDIR/linux-none.cmake <<'EOF'
+            set(CMAKE_SYSTEM_NAME Linux)
+            set(CMAKE_SYSTEM_PROCESSOR ${builtins.head (lib.splitString "-" target)})
+            set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+            EOF
+            export CMAKE_TOOLCHAIN_FILE_${lib.replaceStrings [ "-" ] [ "_" ] target}=$TMPDIR/linux-none.cmake
             export __CARGO_TESTS_ONLY_SRC_ROOT=${std-src}/library
             export CARGO_TARGET_DIR=$NIX_BUILD_TOP/cargo-target
             runHook postConfigure
@@ -221,21 +234,78 @@
         tealdeer = ''
           tldr --version | grep -q tealdeer
         '';
+        # C code in crates: oniguruma and libgit2, zlib-ng, mimalloc
+        bat = ''
+          printf 'fn main() {}\n' > m.rs
+          [ "$(bat -p --color=never m.rs)" = "fn main() {}" ]
+          bat -p --color=always m.rs | grep -q "$(printf '\033')\["
+        '';
+        eza = ''
+          mkdir d && touch d/a d/b
+          [ "$(eza -1 d)" = "$(printf 'a\nb')" ]
+          eza -l --git d | grep -q ' b$'
+        '';
+        lsd = ''
+          mkdir d && touch d/a d/b
+          [ "$(lsd -1 --color never --icon never d)" = "$(printf 'a\nb')" ]
+        '';
+        delta = ''
+          printf 'one\ntwo\n' > x && printf 'one\nthree\n' > y
+          ! delta --no-gitconfig --color-only x y > o
+          grep -q three o
+        '';
+        fselect = ''
+          mkdir d && touch d/a.rs d/b.txt
+          [ "$(fselect name from d where name like '%.rs')" = a.rs ]
+        '';
+        jaq = ''
+          [ "$(echo '{"a":[1,2]}' | jaq -c '.a | map(. * 2)')" = "[2,4]" ]
+        '';
+        jql = ''
+          [ "$(echo '{"a":{"b":3}}' | jql '"a" "b"')" = 3 ]
+        '';
+        skim = ''
+          [ "$(printf 'apple\nbanana\n' | sk --filter ban)" = banana ]
+        '';
+        hck = ''
+          [ "$(printf 'a b c\n' | hck -f2)" = b ]
+          printf 'x\ty\n' | gzip > f.gz
+          [ "$(hck -z -f2 f.gz)" = y ]
+        '';
+        taplo = ''
+          printf 'a   =  1\n' > t.toml
+          taplo fmt t.toml 2>/dev/null
+          [ "$(cat t.toml)" = "a = 1" ]
+        '';
+        # an HTTPS client (rustls on aws-lc), against miniserve (rustls on ring)
+        xh = serve 8445 "${built.miniserve}/bin/miniserve www -i 127.0.0.1 -p 8445 --tls-cert cert.pem --tls-key key.pem" + ''
+          [ "$(xh --ignore-stdin --verify ca.pem --body https://127.0.0.1:8445/hi.txt)" = hello ]
+          kill %1
+        '';
         # web servers, over TLS with rustls: ring's crypto, then aws-lc's
         miniserve = https 8443 "miniserve www -i 127.0.0.1 -p 8443 --tls-cert cert.pem --tls-key key.pem";
         static-web-server = https 8444
           "static-web-server --host 127.0.0.1 --port 8444 --root www --http2 --http2-tls-cert cert.pem --http2-tls-key key.pem";
       };
 
-      # serve www/hi.txt with a self-signed certificate, and fetch it with
-      # curl over TLS
-      https = port: server: ''
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-          -keyout key.pem -out cert.pem -days 1 -subj /CN=localhost 2>/dev/null
+      # serve www/hi.txt over TLS, with a certificate for localhost and
+      # 127.0.0.1 from a test CA (ca.pem): rustls checks the subjectAltName
+      # and wants a CA that is not the server's own certificate
+      serve = port: server: ''
+        key() { openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out $1 2>/dev/null; }
+        key ca.key && key key.pem
+        openssl req -x509 -key ca.key -out ca.pem -days 1 -subj /CN=test-ca 2>/dev/null
+        openssl req -new -key key.pem -subj /CN=localhost 2>/dev/null |
+          openssl x509 -req -CA ca.pem -CAkey ca.key -days 1 -out cert.pem 2>/dev/null \
+            -extfile <(echo "subjectAltName=DNS:localhost,IP:127.0.0.1")
         mkdir www && echo hello > www/hi.txt
         ${server} &
-        get() { curl -sf --cacert cert.pem --resolve localhost:${toString port}:127.0.0.1 "$@" https://localhost:${toString port}/hi.txt; }
-        for i in $(seq 100); do get -o /dev/null && break; sleep 0.1; done
+        for i in $(seq 100); do curl -sf -o /dev/null --cacert ca.pem https://127.0.0.1:${toString port}/hi.txt && break; sleep 0.1; done
+      '';
+
+      # fetch it with curl, over HTTP/1.1 and 2
+      https = port: server: serve port server + ''
+        get() { curl -sf --cacert ca.pem --resolve localhost:${toString port}:127.0.0.1 "$@" https://localhost:${toString port}/hi.txt; }
         [ "$(get --http1.1)" = hello ] && [ "$(get --http2)" = hello ]
         kill %1
       '';
@@ -244,6 +314,11 @@
       overrides = {
         # pcre2 is C
         ripgrep = pkgs.ripgrep.overrideAttrs { buildFeatures = [ ]; };
+        # rustls, their default, rather than nixpkgs' native-tls (OpenSSL)
+        xh = pkgs.xh.overrideAttrs { buildFeatures = [ ]; };
+        taplo = pkgs.taplo.overrideAttrs (o: {
+          buildFeatures = map (f: if f == "native-tls" then "rustls-tls" else f) o.buildFeatures;
+        });
       };
 
       built = lib.mapAttrs (name: _: linuxNone (overrides.${name} or pkgs.${name}) { }) selection;
@@ -251,18 +326,17 @@
       # packages tried that don't build yet (see the README), to retry with
       # `nix build .#candidates.<name>`
       candidates = lib.genAttrs [
-        "jaq" "taplo" "hck"
-        "huniq" "jql" "eza" "lsd"
-        "bat" "gitui" "delta" "xh" "fselect" "skim"
-      ] (name: linuxNone pkgs.${name} { });
+        "huniq" "gitui"
+      ] (name: linuxNone (overrides.${name} or pkgs.${name}) { });
 
       # static, non-PIE executables with no PT_INTERP / PT_DYNAMIC and no
-      # undefined symbol, that pass the smoke test
+      # undefined symbol (but weak ones), that pass the smoke test
       check = name: test: pkgs.runCommand "${name}-linux-none-check" { nativeBuildInputs = with pkgs; [ binutils curl openssl ]; } ''
         for f in ${built.${name}}/bin/*; do
           readelf -hW $f | grep -q "Type: *EXEC" || { echo "$f: not ET_EXEC"; exit 1; }
           ! readelf -lW $f | grep -qE "INTERP|DYNAMIC" || { echo "$f: dynamically linked"; exit 1; }
-          [ -z "$(nm -u $f 2>/dev/null)" ] || { echo "$f: undefined symbols:"; nm -u $f; exit 1; }
+          # weak ones (aws-lc's optional hooks) are null in a static binary
+          [ -z "$(nm -u $f 2>/dev/null | grep -v ' w ')" ] || { echo "$f: undefined symbols:"; nm -u $f; exit 1; }
         done
         export PATH=${built.${name}}/bin:$PATH
         cd $TMPDIR

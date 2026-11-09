@@ -31,26 +31,36 @@ toolchain and std:
   `getpwuid_r`, ...) come from rust-std's runtime (`rt/src/clib.rs`), and
   empty `libc.a`, `libdl.a`, ... satisfy crates that ask the linker for
   them;
-- C code in crates (ring, aws-lc, zstd, ...) is compiled by their build
-  scripts with the host's gcc, with Nix's hardening flags off: rt has no
+- C code in crates (ring, aws-lc, zstd, libgit2, oniguruma, mimalloc,
+  zlib-ng, ...) is compiled by their build scripts with the host's gcc and
+  glibc's headers, with Nix's hardening flags off: rt has no
   `__stack_chk_fail` or `_FORTIFY_SOURCE`'s `__*_chk` functions. It links
-  where rt's C functions (`malloc`, pthread mutexes, ...) are all it calls;
+  against rt's C functions (`rt/src/clib.rs` and `rt/src/clib/`: strings,
+  ctype, printf, `malloc`, pthread keys and locks, directories, ...), so
+  it builds where those are all it calls;
+- the package's own build tools (`nativeBuildInputs`, such as cmake) are
+  kept; C libraries built with cmake get a toolchain file whose compiler
+  checks build a static library, as there is no `libc.a` to link;
 - the rustflags are those of rust-std's `apps/.cargo/config.toml`
   (`+crt-static`, static relocation model, `-no-pie`).
 
 `overrides` in `flake.nix` changes a package first where needed: ripgrep
-is built without its pcre2 feature, which is C.
+is built without its pcre2 feature, which is C, and xh and taplo with
+rustls rather than the native-tls (OpenSSL) nixpkgs picks.
+
+The binaries have no undefined symbols but weak ones (aws-lc's optional
+memory hooks), which are null in a static executable.
 
 Only the executables are installed: no man pages, shell completions or
 wrappers from the nixpkgs `postInstall`.
 
 To add a package, add its nixpkgs attribute name to `selection` in
 `flake.nix` with a smoke test. The packages that don't build yet are in
-`candidates`: `nix build .#candidates.bat` shows why.
+`candidates`: `nix build .#candidates.gitui` shows why.
 
 ## What builds
 
-28 of the 41 packages tried. Each one is a static ELF with no
+39 of the 41 packages tried. Each one is a static ELF with no
 undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 
 | package | version | smoke test |
@@ -83,25 +93,27 @@ undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 | oxipng | 10.2.1 | optimize a PNG |
 | miniserve | 0.35.0 | serve a file over HTTPS: rustls on ring, HTTP/1.1 and 2 |
 | static-web-server | 2.44.1 | serve a file over HTTPS: rustls on aws-lc |
+| xh | 0.26.3 | fetch a file over HTTPS from miniserve, verifying its certificate |
+| bat | 0.26.1 | print and highlight a file (oniguruma) |
+| eza | 0.23.5 | list a directory, with `--git` (libgit2) |
+| lsd | 1.2.0 | list a directory |
+| delta | 0.20.1 | diff two files |
+| fselect | 0.10.3 | query files by name |
+| jaq | 3.1.2 | a jq filter (mimalloc) |
+| jql | 8.1.2 | a JSON query |
+| skim | 5.7.4 | filter lines (`--filter`; it is interactive) |
+| hck | 0.11.6 | cut a field, and from a gzip file (zlib-ng) |
+| taplo | 0.10.0 | format TOML |
 
 ## What doesn't, and why
 
-The other 13, by cause (as of nixpkgs `1d06008`):
+The other 2 (as of nixpkgs `1d06008`):
 
-- **C code that needs more of a C library** than rt has:
-  - `bat`, `eza`, `lsd`, `delta`: libgit2 or oniguruma (`strncpy`,
-    `strncasecmp`, `mkdir`, ...)
-  - `fselect` (`pthread_rwlock_*`), `jaq` (`pthread_key_*`, `select`),
-    `jql` (`pthread_getattr_np`, ...), `skim` (`killpg`, `mkfifo`)
-  - `hck` (zlib-ng), `taplo` and `xh` (OpenSSL): their build scripts look
-    for the C library and fail
-- **Other:** `huniq` uses the removed `stdsimd` feature (an old `ahash`
-  on a new nightly); `gitui`'s build script wants environment the
-  nixpkgs derivation sets, which `linuxNone` doesn't copy.
-
-Some of these may have cargo features that drop their C parts, as
-ripgrep's pcre2 feature does; an override in `overrides` would then get
-them building.
+- `huniq` uses the removed `stdsimd` feature (an old `ahash` on a new
+  nightly);
+- `gitui` builds OpenSSL from source (`vendor-openssl`), which
+  `openssl-src` doesn't know how to configure for linux-none, and which
+  would need much more of a C library than rt has.
 
 The `rust-std` input is `git+file:///home/j/src/rust-std`: it builds from
 the committed state of that repo. Run `nix flake update rust-std` after
