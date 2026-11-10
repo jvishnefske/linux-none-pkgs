@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  # rust-std's main moves on its own; catch breakage from it weekly
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  # the package names, from the flake's checks
+  list:
+    runs-on: ubuntu-24.04
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - id: list
+        run: echo "packages=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)" >> "$GITHUB_OUTPUT"
+
+  # one job per package: all of them together don't fit on a runner's disk
+  check:
+    needs: list
+    name: ${{ matrix.package }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.list.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      # builds the package on linux-none's std, then checks it's a static ELF
+      # with no undefined symbols and runs its smoke test
+      - run: nix build -L --no-link .#checks.x86_64-linux.${{ matrix.package }}
