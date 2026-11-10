@@ -115,6 +115,6 @@ The other 2 (as of nixpkgs `1d06008`):
   `openssl-src` doesn't know how to configure for linux-none, and which
   would need much more of a C library than rt has.
 
-The `rust-std` input is `git+file:///home/j/src/rust-std`: it builds from
-the committed state of that repo. Run `nix flake update rust-std` after
-committing there.
+The `rust-std` input is `github:jvishnefske/rust-std`. Run
+`nix flake update rust-std` to build on its latest commit, or
+`--override-input rust-std path:../rust-std` to build on a local checkout.

@@ -2,7 +2,7 @@
   description = "nixpkgs Rust packages rebuilt for x86_64-unknown-linux-none on the libc-free std";
 
   inputs = {
-    rust-std.url = "git+file:///home/j/src/rust-std";
+    rust-std.url = "github:jvishnefske/rust-std";
     nixpkgs.follows = "rust-std/nixpkgs";
   };
 
