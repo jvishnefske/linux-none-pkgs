@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "middleware": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793146334,
+        "narHash": "sha256-XvhDWaLmUZvT5erM1BhmztlND7XnhCvN3piOCK/YxbI=",
+        "owner": "jvishnefske",
+        "repo": "middleware",
+        "rev": "ebf9433ed2a393023f8adfe472ccb72f60083615",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jvishnefske",
+        "repo": "middleware",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1793726008,
@@ -18,6 +34,7 @@
     },
     "root": {
       "inputs": {
+        "middleware": "middleware",
         "nixpkgs": [
           "rust-std",
           "nixpkgs"
@@ -52,11 +69,11 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1794200977,
-        "narHash": "sha256-DO5ffPKNEw7GkxwgxudN/aVYqX2R+wEihMl2SkiFuMI=",
+        "lastModified": 1794369134,
+        "narHash": "sha256-x6g+pkcmrcRpUMUhC1TbetTs0DdybaUjBIwtG1aLLV4=",
         "owner": "jvishnefske",
         "repo": "rust-std",
-        "rev": "704e749460459dfd2a74e38766c804467f75e2df",
+        "rev": "ae1ff6d21730de3b5a23c316e174c4274424c319",
         "type": "github"
       },
       "original": {

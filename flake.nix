@@ -4,9 +4,10 @@
   inputs = {
     rust-std.url = "github:jvishnefske/rust-std";
     nixpkgs.follows = "rust-std/nixpkgs";
+    middleware = { url = "github:jvishnefske/middleware"; flake = false; };
   };
 
-  outputs = { self, nixpkgs, rust-std }:
+  outputs = { self, nixpkgs, rust-std, middleware }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -24,8 +25,10 @@
 
       # Rebuild a nixpkgs `buildRustPackage` package from its own source and
       # vendored crates, with std built from the patched tree. Only the
-      # binaries are kept: no man pages, completions or wrappers.
-      linuxNone = pkg: { extraCargoFlags ? [ ] }:
+      # binaries are kept: no man pages, completions or wrappers. With
+      # `tests` (cargo flags), `cargo test` runs those tests after the build,
+      # on linux-none, where their build-time paths exist.
+      linuxNone = pkg: { extraCargoFlags ? [ ], tests ? null }:
         let
           deps = pkg.cargoDeps;
           # crates.io: the package's crates plus std's (rust-src vendors them).
@@ -115,6 +118,19 @@
             ${lib.optionalString ((pkg.buildAndTestSubdir or null) != null) "cd ${pkg.buildAndTestSubdir}"}
             cargo build --release --frozen --target ${target} ${flags}
             runHook postBuild
+          '';
+          doCheck = tests != null;
+          # each test in a child process, as the target's panics abort. Cargo
+          # passes -Zpanic-abort-tests on to rustc only when the profile
+          # itself says abort: the target's default isn't enough, and without
+          # it libtest runs tests in-process, losing the message of the
+          # first panic.
+          checkPhase = ''
+            runHook preCheck
+            cargo test --release --frozen --target ${target} \
+              -Zbuild-std=std,panic_abort,test -Zpanic-abort-tests \
+              --config 'profile.release.panic="abort"' ${toString tests}
+            runHook postCheck
           '';
           installPhase = ''
             runHook preInstall
@@ -284,6 +300,17 @@
         '';
         # web servers, over TLS with rustls: ring's crypto, then aws-lc's
         miniserve = https 8443 "miniserve www -i 127.0.0.1 -p 8443 --tls-cert cert.pem --tls-key key.pem";
+        # not in nixpkgs: pub/sub and request/response over Zenoh and gRPC
+        # (tokio, tonic), the serial CLI and the WASM payload simulator.
+        # Its own test suites run as it is built.
+        middleware = ''
+          # an Ed25519 key, and its public half
+          mwctl key new k.key > /dev/null
+          [ "$(mwctl key pub k.key | wc -c)" = 65 ]
+          # the echo payload, on the wasmi interpreter
+          wat2wasm ${middleware}/payloads/templates/echo.wat -o echo.wasm
+          echo 'app/echo/in hello' | payload-sim echo.wasm --ticks 1 | grep -qx '.*publish app/echo/out hello'
+        '';
         static-web-server = https 8444
           "static-web-server --host 127.0.0.1 --port 8444 --root www --http2 --http2-tls-cert cert.pem --http2-tls-key key.pem";
       };
@@ -321,7 +348,24 @@
         });
       };
 
-      built = lib.mapAttrs (name: _: linuxNone (overrides.${name} or pkgs.${name}) { }) selection;
+      # packages from outside nixpkgs, as buildRustPackage would build them
+      outside = {
+        middleware = pkgs.rustPlatform.buildRustPackage {
+          pname = "middleware";
+          version = "0.4.0";
+          src = middleware;
+          cargoHash = "sha256-z+0XP+GcclcrdYpPH37GN1HRDhXIOWk/TW2UNxACH3M=";
+          # protocol-wasm is for wasm32 (wasm-bindgen)
+          cargoBuildFlags = [ "--workspace" "--exclude" "protocol-wasm" "--all-features" ];
+        };
+      };
+
+      # extra arguments to linuxNone
+      args = {
+        middleware.tests = "--workspace --exclude protocol-wasm --all-features";
+      };
+
+      built = lib.mapAttrs (name: _: linuxNone (overrides.${name} or outside.${name} or pkgs.${name}) (args.${name} or { })) selection;
 
       # packages tried that don't build yet (see the README), to retry with
       # `nix build .#candidates.<name>`
@@ -331,7 +375,7 @@
 
       # static, non-PIE executables with no PT_INTERP / PT_DYNAMIC and no
       # undefined symbol (but weak ones), that pass the smoke test
-      check = name: test: pkgs.runCommand "${name}-linux-none-check" { nativeBuildInputs = with pkgs; [ binutils curl openssl ]; } ''
+      check = name: test: pkgs.runCommand "${name}-linux-none-check" { nativeBuildInputs = with pkgs; [ binutils curl openssl wabt ]; } ''
         for f in ${built.${name}}/bin/*; do
           readelf -hW $f | grep -q "Type: *EXEC" || { echo "$f: not ET_EXEC"; exit 1; }
           ! readelf -lW $f | grep -qE "INTERP|DYNAMIC" || { echo "$f: dynamically linked"; exit 1; }

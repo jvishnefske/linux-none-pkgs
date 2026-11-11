@@ -60,7 +60,7 @@ To add a package, add its nixpkgs attribute name to `selection` in
 
 ## What builds
 
-39 of the 41 packages tried. Each one is a static ELF with no
+40 of the 42 packages tried. Each one is a static ELF with no
 undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 
 | package | version | smoke test |
@@ -104,6 +104,23 @@ undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 | skim | 5.7.4 | filter lines (`--filter`; it is interactive) |
 | hck | 0.11.6 | cut a field, and from a gzip file (zlib-ng) |
 | taplo | 0.10.0 | format TOML |
+| [middleware] | 0.4.0 | not from nixpkgs: see below |
+
+[middleware]: https://github.com/jvishnefske/middleware
+
+middleware, a pub/sub and request/response library, is built from its own
+repository (the `middleware` input) with all its features: the Zenoh and
+gRPC (tonic) transports on tokio, the `mwctl` serial CLI and the
+`payload-sim` WASM payload simulator (wasmi). Its own test suites run as it
+is built, 367 tests, the Zenoh and gRPC ones over loopback. The smoke test
+makes an Ed25519 key with `mwctl` and runs the `echo.wat` payload template
+in `payload-sim`.
+
+Its tests run on linux-none with `-Zpanic-abort-tests` (each test in a child
+process), which cargo passes on to rustc only when the profile says
+`panic = "abort"`: the target's default isn't enough, so the builder sets
+it. Without it, libtest runs the tests in-process, and the first panic
+aborts the whole run before its message is printed.
 
 ## What doesn't, and why
 
@@ -117,4 +134,6 @@ The other 2 (as of nixpkgs `1d06008`):
 
 The `rust-std` input is `github:jvishnefske/rust-std`. Run
 `nix flake update rust-std` to build on its latest commit, or
-`--override-input rust-std path:../rust-std` to build on a local checkout.
+`--override-input rust-std git+file://$PWD/../rust-std` to build on a local
+checkout, uncommitted changes included. (Not `path:`, which copies its
+`target/` directories into the store.)
