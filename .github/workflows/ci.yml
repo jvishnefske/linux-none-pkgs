@@ -36,3 +36,12 @@ jobs:
       # builds the package on linux-none's std, then checks it's a static ELF
       # with no undefined symbols and runs its smoke test
       - run: nix build -L --no-link .#checks.x86_64-linux.${{ matrix.package }}
+
+  # the one check branch protection requires, since the matrix's job names
+  # follow the package list
+  all:
+    needs: check
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test "${{ needs.check.result }}" = success
