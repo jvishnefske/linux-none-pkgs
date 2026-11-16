@@ -9,12 +9,17 @@ syscalls.
 nix build            # every package, binaries in result/bin
 nix build .#sd       # one package
 nix flake check      # static-ELF check and smoke test of every package
+nix run .#bench      # against musl and glibc builds: bench/results.md
 ```
+
+For your own crate, `nix flake init -t github:jvishnefske/linux-none-pkgs`
+gives a flake that builds it with `lib.buildLinuxNone`.
 
 ## How it works
 
-`lib.x86_64-linux.linuxNone pkg { extraCargoFlags ? [] }` takes a nixpkgs
-`buildRustPackage` package and rebuilds it with the same source, patches,
+`lib.buildLinuxNone pkg { extraCargoFlags ? [], tests ? null }` (also
+`lib.x86_64-linux.linuxNone`) takes a `buildRustPackage` package, from
+nixpkgs or your own (with `cargoHash` or `cargoLock`), and rebuilds it with the same source, patches,
 features and vendored crates (`pkg.cargoDeps`). The difference is the
 toolchain and std:
 
@@ -33,8 +38,9 @@ toolchain and std:
   them;
 - C code in crates (ring, aws-lc, zstd, libgit2, oniguruma, mimalloc,
   zlib-ng, ...) is compiled by their build scripts with the host's gcc and
-  glibc's headers, with Nix's hardening flags off: rt has no
-  `__stack_chk_fail` or `_FORTIFY_SOURCE`'s `__*_chk` functions. It links
+  glibc's headers, with Nix's hardening flags: rt has the stack
+  protector's canary and `__stack_chk_fail`, and `_FORTIFY_SOURCE`'s
+  `__*_chk` functions. It links
   against rt's C functions (`rt/src/clib.rs` and `rt/src/clib/`: strings,
   ctype, printf, `malloc`, pthread keys and locks, directories, ...), so
   it builds where those are all it calls;
@@ -45,8 +51,10 @@ toolchain and std:
   (`+crt-static`, static relocation model, `-no-pie`).
 
 `overrides` in `flake.nix` changes a package first where needed: ripgrep
-is built without its pcre2 feature, which is C, and xh and taplo with
-rustls rather than the native-tls (OpenSSL) nixpkgs picks.
+is built without its pcre2 feature, which is C, xh and taplo with rustls
+rather than the native-tls (OpenSSL) nixpkgs picks, and huniq with ahash
+0.7.8 (`patches/`), as 0.7.6 turns on the `stdsimd` feature that
+nightlies no longer have.
 
 The binaries have no undefined symbols but weak ones (aws-lc's optional
 memory hooks), which are null in a static executable.
@@ -60,7 +68,7 @@ To add a package, add its nixpkgs attribute name to `selection` in
 
 ## What builds
 
-40 of the 42 packages tried. Each one is a static ELF with no
+41 of the 42 packages tried. Each one is a static ELF with no
 undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 
 | package | version | smoke test |
@@ -83,6 +91,7 @@ undefined symbols, and passes a smoke test (`checks` in `flake.nix`).
 | ripgrep | 15.2.0 | search (without pcre2) |
 | tokei | 15.0.0 | count lines of code |
 | hyperfine | 2.0.0 | benchmark a command, export JSON |
+| huniq | 2.7.0 | drop and count repeated lines |
 | dua | 2.46.0 | disk usage |
 | just | 1.59.0 | run a recipe |
 | mdbook | 0.5.4 | build a book |
@@ -124,13 +133,11 @@ aborts the whole run before its message is printed.
 
 ## What doesn't, and why
 
-The other 2 (as of nixpkgs `1d06008`):
-
-- `huniq` uses the removed `stdsimd` feature (an old `ahash` on a new
-  nightly);
-- `gitui` builds OpenSSL from source (`vendor-openssl`), which
-  `openssl-src` doesn't know how to configure for linux-none, and which
-  would need much more of a C library than rt has.
+The other one (as of nixpkgs `1d06008`): `gitui` builds OpenSSL from
+source (`vendor-openssl`), which `openssl-src` doesn't know how to
+configure for linux-none, and which would need much more of a C library
+than rt has. It has no rustls feature to use instead: git2's `https`
+always means OpenSSL on Linux.
 
 The `rust-std` input is `github:jvishnefske/rust-std`. Run
 `nix flake update rust-std` to build on its latest commit, or

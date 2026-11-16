@@ -1,0 +1,136 @@
+# Measure each package's linux-none, musl and glibc builds ($BINS: lines of
+# `<package> <variant> <bin dir>`) and write a Markdown report to $1
+# (default bench/results.md).
+out=${1:-bench/results.md}
+runs=${BENCH_RUNS:-10}
+secs=${BENCH_SECS:-10}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$(dirname "$out")"
+
+# the payload simulator's input: a message per tick
+awk 'BEGIN { for (i = 0; i < 100000; i++) print "app/echo/in hello" }' > "$work/msgs"
+
+# a TLS certificate for the web server
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$work/key.pem" \
+  -out "$work/cert.pem" -days 1 -subj /CN=localhost -addext subjectAltName=IP:127.0.0.1 2>/dev/null
+mkdir "$work/www"
+head -c 4096 /dev/urandom | base64 > "$work/www/page.txt"
+
+# hyperfine 2's JSON has the runs only: their mean and standard deviation
+ms() {
+  jq -r '[.results[0].measurements[].time_wall_clock.value * 1000] | (add / length) as $m
+    | (map(. - $m | . * .) | add / length | sqrt) as $sd
+    | "\($m * 100 | round / 100) ± \($sd * 100 | round / 100) ms"' "$1"
+}
+
+# strace's log -> "distinct / total"
+syscalls() {
+  sed -E 's/^[0-9]+ +//' "$1" | grep -oE '^[a-z_0-9]+\(' > "$work/names" || true
+  echo "$(sort -u "$work/names" | wc -l) / $(wc -l < "$work/names")"
+}
+
+# what each package runs: its binary, the start-up command's arguments and
+# the workload's
+bin_of() { case $1 in ripgrep) echo rg ;; fd) echo fd ;; static-web-server) echo static-web-server ;; middleware) echo payload-sim ;; esac; }
+start_args() { case $1 in middleware) echo "$ECHO_WASM --ticks 1" ;; *) echo --version ;; esac; }
+workload() {
+  case $1 in
+    ripgrep) echo "-c mkDerivation $TREE" ;;
+    fd) echo "-e nix . $TREE" ;;
+    middleware) echo "$ECHO_WASM --ticks 100000" ;;
+  esac
+}
+describe() {
+  case $1 in
+    ripgrep) echo "\`rg -c mkDerivation\` over nixpkgs' source" ;;
+    fd) echo "\`fd -e nix\` over nixpkgs' source" ;;
+    static-web-server) echo "HTTPS (rustls, HTTP/1.1) requests/s from \`oha -c 32\` for ${secs}s, a 5.5 KiB file" ;;
+    middleware) echo "\`payload-sim\` running the echo payload for 100,000 ticks (wasmi)" ;;
+  esac
+}
+
+port=8460
+# the server: start it (under strace if $2 is set), wait for it, run $3
+serve() {
+  local exe=$1 trace=$2 load=$3 pid
+  port=$((port + 1))
+  local args=(--host 127.0.0.1 --port "$port" --root "$work/www" --http2 --http2-tls-cert "$work/cert.pem" --http2-tls-key "$work/key.pem" --log-level error)
+  if [ -n "$trace" ]; then
+    strace -f -qq -o "$trace" -- "$exe" "${args[@]}" & pid=$!
+  else
+    "$exe" "${args[@]}" & pid=$!
+  fi
+  for _ in $(seq 100); do curl -skf -o /dev/null "https://127.0.0.1:$port/page.txt" && break; sleep 0.1; done
+  url="https://127.0.0.1:$port/page.txt" server=$pid eval "$load"
+  # the server itself (strace's child when traced)
+  pkill -INT -P "$pid" 2>/dev/null || true
+  kill -INT "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+rows=()
+while read -r pkg variant dir; do
+  exe=$dir/$(bin_of "$pkg")
+  echo "bench: $pkg ($variant)" >&2
+  strip -o "$work/stripped" "$exe"
+  size="$(( $(stat -c %s "$work/stripped") / 1024 )) KiB"
+  readelf -lW "$exe" > "$work/phdrs"
+  link=$(if grep -q INTERP "$work/phdrs"; then echo dynamic; else echo static; fi)
+  hyperfine -N --warmup 5 --runs 200 --export-json "$work/start.json" -- "$exe $(start_args "$pkg")" > /dev/null 2>&1
+  start=$(ms "$work/start.json")
+
+  if [ "$pkg" = static-web-server ]; then
+    # requests/s; the server's peak RSS from /proc after the load
+    # shellcheck disable=SC2016 # expanded by serve
+    serve "$exe" "" 'oha -z ${secs}s -c 32 --insecure --no-tui --output-format json "$url" > "$work/oha.json";
+      rss_kb=$(awk "/VmHWM/ {print \$2}" /proc/$server/status)'
+    perf="$(jq -r '.summary.requestsPerSec | round' "$work/oha.json") req/s"
+    # shellcheck disable=SC2154 # set by the load above
+    rss="$((rss_kb / 1024)) MiB"
+    # shellcheck disable=SC2016
+    serve "$exe" "$work/trace" 'oha -n 2000 -c 8 --insecure --no-tui --output-format quiet "$url"'
+    sys=$(syscalls "$work/trace")
+  else
+    read -ra wargs <<< "$(workload "$pkg")"
+    hyperfine -N --warmup 1 --runs "$runs" --input "$work/msgs" --export-json "$work/w.json" -- "$exe ${wargs[*]}" > /dev/null 2>&1
+    perf=$(ms "$work/w.json")
+    command time -f %M -o "$work/rss" "$exe" "${wargs[@]}" < "$work/msgs" > /dev/null
+    rss="$(( $(cat "$work/rss") / 1024 )) MiB"
+    strace -f -qq -o "$work/trace" -- "$exe" "${wargs[@]}" < "$work/msgs" > /dev/null
+    sys=$(syscalls "$work/trace")
+  fi
+  rows+=("$pkg|$variant ($link)|$size|$start|$rss|$perf|$sys")
+done < "$BINS"
+
+{
+  echo "# linux-none against musl and glibc"
+  echo
+  echo "The same sources, features and release profiles, built three ways:"
+  echo "linux-none-pkgs' builder (std on \`x86_64-unknown-linux-none\`),"
+  echo "nixpkgs' \`pkgsStatic\` (musl, static) and nixpkgs (glibc, dynamic)."
+  echo "Generated by \`nix run .#bench\` on $(date -u +%Y-%m-%d):"
+  echo "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //'), $(nproc) CPUs, Linux $(uname -r)."
+  echo
+  echo "- **Size**: the stripped executable (for glibc, without the shared libraries it loads)."
+  echo "- **Start**: \`--version\` (payload-sim: one tick), mean of 200 runs."
+  echo "- **Peak RSS**: of the workload (GNU time; the server: VmHWM after the load)."
+  echo "- **Syscalls**: distinct / total, from \`strace -f\` over the workload (the server: 2,000 requests)."
+  echo
+  last=
+  for r in "${rows[@]}"; do
+    IFS='|' read -r pkg variant size start rss perf sys <<< "$r"
+    if [ "$pkg" != "$last" ]; then
+      echo
+      echo "## $pkg"
+      echo
+      echo "Workload: $(describe "$pkg")."
+      echo
+      echo "| Build | Size | Start | Peak RSS | Workload | Syscalls |"
+      echo "|---|---:|---:|---:|---:|---:|"
+      last=$pkg
+    fi
+    echo "| $variant | $size | $start | $rss | $perf | $sys |"
+  done
+} > "$out"
+echo "bench: wrote $out" >&2
