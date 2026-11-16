@@ -35,9 +35,14 @@
           # libc gets std's fixup (musl's types and constants, nothing to
           # link); crates that pick libc's glibc or musl definitions by
           # target_env get musl's. Patched crates lose their file checksums.
+          # (fetchCargoVendor, for `cargoHash`, keeps the crates in
+          # source-registry-0; importCargoLock, for `cargoLock`, at the top.)
           registry = pkgs.runCommand "${pkg.pname}-linux-none-registry" { nativeBuildInputs = [ xtask pkgs.jq ]; } ''
             mkdir $out
-            for d in ${deps}/source-registry-0/* ${std-src}/library/vendor/*; do
+            crates=${deps}/source-registry-0
+            [ -d $crates ] || crates=${deps}
+            for d in $crates/* ${std-src}/library/vendor/*; do
+              [ -d $d ] || continue
               n=$(basename $d)
               [ -e $out/$n ] && continue
               case $n in
@@ -48,7 +53,7 @@
                 ln -s $d $out/$n
                 continue
               fi
-              cp -r $d $out/$n
+              cp -rL $d $out/$n
               chmod -R u+w $out/$n
               xtask $fixup $out/$n
               jq -c '.files = {}' $d/.cargo-checksum.json > $out/$n/.cargo-checksum.json
@@ -73,10 +78,10 @@
               (pkg.nativeBuildInputs or [ ]);
           # static binaries: nothing for strip / patchelf to do
           dontFixup = true;
-          # C code in crates (ring, zstd) is compiled with the host's gcc;
-          # without the hardening flags, it needs no __stack_chk_fail or
-          # *_chk functions, which there is no libc to provide
-          hardeningDisable = [ "all" ];
+          # C code in crates (ring, zstd) is compiled with the host's gcc and
+          # nixpkgs' hardening flags: rt provides the stack protector's
+          # canary and __stack_chk_fail, and _FORTIFY_SOURCE's __*_chk
+          # functions
           configurePhase = ''
             runHook preConfigure
             export CARGO_HOME=$TMPDIR/cargo-home
@@ -85,6 +90,7 @@
             # with crates.io pointed at the merged registry
             sed -e 's|@vendor@|${deps}|' \
                 -e 's|^directory = "${deps}/source-registry-0"$|directory = "${registry}"|' \
+                -e 's|^directory = "cargo-vendor-dir"$|directory = "${registry}"|' \
                 ${deps}/.cargo/config.toml > $CARGO_HOME/config.toml
             cat >> $CARGO_HOME/config.toml <<'EOF'
 
@@ -176,6 +182,10 @@
         dust = ''
           mkdir -p a && head -c 100000 /dev/zero > a/f
           dust -b -c a | grep -q ' a$'
+        '';
+        huniq = ''
+          [ "$(printf 'a\nb\na\nc\nb\n' | huniq)" = "$(printf 'a\nb\nc')" ]
+          [ "$(printf 'a\nb\na\n' | huniq -c | sort)" = "$(printf '1 b\n2 a')" ]
         '';
         choose = ''
           [ "$(echo 'a b c' | choose 1)" = b ]
@@ -343,21 +353,28 @@
         ripgrep = pkgs.ripgrep.overrideAttrs { buildFeatures = [ ]; };
         # rustls, their default, rather than nixpkgs' native-tls (OpenSSL)
         xh = pkgs.xh.overrideAttrs { buildFeatures = [ ]; };
+        # ahash 0.7.6 turns on the `stdsimd` feature, which nightlies no
+        # longer have; 0.7.8 doesn't (with a newer once_cell)
+        huniq = pkgs.huniq.overrideAttrs (o: {
+          patches = (o.patches or [ ]) ++ [ ./patches/huniq-ahash.patch ];
+          cargoDeps = pkgs.rustPlatform.importCargoLock { lockFile = ./patches/huniq-Cargo.lock; };
+        });
         taplo = pkgs.taplo.overrideAttrs (o: {
           buildFeatures = map (f: if f == "native-tls" then "rustls-tls" else f) o.buildFeatures;
         });
       };
 
       # packages from outside nixpkgs, as buildRustPackage would build them
+      middlewareArgs = {
+        pname = "middleware";
+        version = "0.4.0";
+        src = middleware;
+        cargoHash = "sha256-z+0XP+GcclcrdYpPH37GN1HRDhXIOWk/TW2UNxACH3M=";
+        # protocol-wasm is for wasm32 (wasm-bindgen)
+        cargoBuildFlags = [ "--workspace" "--exclude" "protocol-wasm" "--all-features" ];
+      };
       outside = {
-        middleware = pkgs.rustPlatform.buildRustPackage {
-          pname = "middleware";
-          version = "0.4.0";
-          src = middleware;
-          cargoHash = "sha256-z+0XP+GcclcrdYpPH37GN1HRDhXIOWk/TW2UNxACH3M=";
-          # protocol-wasm is for wasm32 (wasm-bindgen)
-          cargoBuildFlags = [ "--workspace" "--exclude" "protocol-wasm" "--all-features" ];
-        };
+        middleware = pkgs.rustPlatform.buildRustPackage middlewareArgs;
       };
 
       # extra arguments to linuxNone
@@ -365,12 +382,14 @@
         middleware.tests = "--workspace --exclude protocol-wasm --all-features";
       };
 
+      bench = import ./bench { inherit pkgs lib built middlewareArgs middleware nixpkgs; };
+
       built = lib.mapAttrs (name: _: linuxNone (overrides.${name} or outside.${name} or pkgs.${name}) (args.${name} or { })) selection;
 
       # packages tried that don't build yet (see the README), to retry with
       # `nix build .#candidates.<name>`
       candidates = lib.genAttrs [
-        "huniq" "gitui"
+        "gitui"
       ] (name: linuxNone (overrides.${name} or pkgs.${name}) { });
 
       # static, non-PIE executables with no PT_INTERP / PT_DYNAMIC and no
@@ -390,13 +409,27 @@
       '';
     in
     {
-      lib.${system}.linuxNone = linuxNone;
+      # linuxNone, for other flakes: `buildLinuxNone <a buildRustPackage
+      # derivation> { extraCargoFlags ? [ ], tests ? null }`, for x86_64-linux
+      lib = { buildLinuxNone = linuxNone; ${system}.linuxNone = linuxNone; };
+
+      templates.default = {
+        path = ./templates/crate;
+        description = "A crate built with lib.buildLinuxNone";
+      };
+
+      # linux-none against musl and glibc builds of the same packages
+      apps.${system}.bench = {
+        type = "app";
+        program = "${bench}/bin/linux-none-bench";
+      };
 
       legacyPackages.${system}.candidates = candidates;
 
       checks.${system} = lib.mapAttrs check selection;
 
       packages.${system} = built // {
+        inherit bench;
         default = pkgs.symlinkJoin { name = "linux-none-pkgs"; paths = lib.attrValues built; };
       };
     };
